@@ -1,0 +1,198 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import argparse
+import re
+
+import pandas as pd
+from rich.console import Console
+
+
+class Scraper:
+    def __init__(self, silent=False, verbose=False):
+        self.silent = silent
+        self.verbose = verbose
+        self.console = Console()
+
+        # pd.read_excel(self.source_data[2023], sheet_name="MoJ", engine="odf")
+        # self.source_urls = {
+        #     2023: "https://assets.publishing.service.gov.uk/media/67e56dd1bb6002588a90d662/2025-03-24_Government_Grants_Register_2023_to_2024.ods",
+        #     2022: "https://assets.publishing.service.gov.uk/media/67e3f147f356a2dc0e39b48f/2024-03-19_Government_Grants_Register_2022_to_2023.ods",
+        #     2021: "https://assets.publishing.service.gov.uk/media/6436aae0cc9980000cb893d4/2023-03-28_Government_Grants_Register_2021_to_2022.ods",
+        # }
+
+        # Downloaded and converted to XLSX because Pandas ODS is SLOOOOOOW.
+        self.source_data = {
+            2023: "data/2025-03-24_Government_Grants_Register_2023_to_2024.xlsx",
+            2022: "data/2024-03-19_Government_Grants_Register_2022_to_2023.xlsx",
+            2021: "data/2023-03-28_Government_Grants_Register_2021_to_2022.xlsx",
+        }
+
+        self.print_unless_silent("Importing data")
+        self.ho2023 = self.dataframe_from_excel(2023, "HO", "- Home Office 2023")
+        self.moj2023 = self.dataframe_from_excel(2023, "MoJ", "- Ministry of Justice 2023")
+        self.ho2022 = self.dataframe_from_excel(2022, "HO", "- Home Office 2022")
+        self.moj2022 = self.dataframe_from_excel(2022, "MoJ", "- Ministry of Justice 2022")
+        self.ho2021 = self.dataframe_from_excel(2021, "HO", "- Home Office 2021")
+        self.moj2021 = self.dataframe_from_excel(2021, "MoJ", "- Ministry of Justice 2021")
+
+        self.print_unless_silent("- Police force areas")
+        dfpfa = pd.read_csv("data/pfa.csv")
+        self.dfpfa = dfpfa[dfpfa["active"]]
+
+    def run(self):
+        self.print_unless_silent("Combining data")
+        df = pd.concat([
+            self.ho2023,
+            self.moj2023,
+            self.ho2022,
+            self.moj2022,
+            self.ho2021,
+            self.moj2021,
+        ])
+
+        # Deduplicate (the same funding sometimes spans multiple years)
+        self.print_unless_silent("Dropping duplicates")
+        df = df.drop_duplicates(subset="Identifier")
+
+        self.print_unless_silent("Categorising")
+        df["is_police_authority"] = df["Recipient Org:Name"].apply(self.is_police_authority)
+        df["is_vawg_related"] = df.apply(self.is_vawg_related, axis=1)
+
+        self.print_unless_silent("Adding area codes")
+        df["area_code"] = df["Recipient Org:Name"].apply(self.get_matching_area_code)
+
+        self.print_unless_silent("Exporting")
+        df.to_csv("output.csv", index=False)
+
+    def dataframe_from_excel(self, source_data_key, sheet_name, log):
+        self.print_unless_silent(log)
+        return pd.read_excel(self.source_data[source_data_key], sheet_name=sheet_name)
+
+    def is_police_authority(self, org_name):
+        needles = [
+            "policing",
+            "police",
+            "pcc",
+            "durham constabulary",
+            "combined authority",
+        ]
+
+        for needle in needles:
+            if needle in org_name.lower():
+                return True
+
+        return False
+
+    def is_vawg_related(self, row):
+        needles = [
+            "domestic abuse",
+            "domestic violence",
+            "sexual abuse",
+            "sexual exploitation",
+            "sexual violence",
+            "vawg",
+        ]
+        haystack = " ".join([
+            row["Title"],
+            row["Description"],
+            row["Grant Programme:Title"],
+        ]).lower()
+
+        for needle in needles:
+            if needle in haystack:
+                return True
+
+        return False
+
+    def get_matching_area(self, org_name):
+        custom_areas = {
+            "mayors office for policing": "E23000001",
+            "mopc": "E23000001",
+            "city of london police": "E23000034",
+            "devon": "E23000035",
+            "dyfed powys": "W15000004",
+        }
+
+        for needle, area_code in custom_areas.items():
+            if self.clean(needle) in self.clean(org_name):
+                area = self.dfpfa[self.dfpfa["code"] == area_code].iloc[0].to_dict()
+                return area
+
+        for j, area in self.dfpfa.iterrows():
+            if self.clean(area["name"]) in self.clean(org_name):
+                return area
+
+        return None
+
+    def get_matching_area_code(self, org_name):
+        custom_areas = {
+            "mayors office for policing": "E23000001",
+            "mopc": "E23000001",
+            "city of london police": "E23000034",
+            "devon": "E23000035",
+            "dyfed powys": "W15000004",
+        }
+
+        for needle, area_code in custom_areas.items():
+            if self.clean(needle) in self.clean(org_name):
+                return area_code
+
+        for j, area in self.dfpfa.iterrows():
+            if self.clean(area["name"]) in self.clean(org_name):
+                return area["code"]
+
+        return None
+
+    def clean(self, string):
+        string = string.lower()
+        string = string.replace("&", "and")
+        string = re.sub(r'[^a-z ]+', '', string)
+        string = string.strip()
+        return string
+
+    def print_unless_silent(self, *args):
+        if not self.silent:
+            self.console.print(*args)
+
+    def print_if_verbose(self, *args):
+        if self.verbose:
+            self.console.print(*args)
+
+
+if __name__ == '__main__':
+    description = """
+    Export data on central government funding for PCC anti-VAWG services
+    """
+
+    examples = """examples:
+    %(prog)s
+    %(prog)s --silent
+    """
+
+    parser = argparse.ArgumentParser(
+        description=description,
+        epilog=examples,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    parser.add_argument(
+        '-s',
+        '--silent',
+        action='store_true',
+        default=False,
+        help='Suppress all logging output (default: %(default)s)'
+    )
+
+    parser.add_argument(
+        '-v',
+        '--verbose',
+        action='store_true',
+        default=False,
+        help='Produce more detailed logging output (default: %(default)s)'
+    )
+
+    args = parser.parse_args()
+
+    scraper = Scraper(**vars(args))
+    scraper.run()

@@ -1,0 +1,24 @@
+#!/bin/sh
+
+set -e
+
+# Go to project root
+cd "$(dirname "$0")/.."
+
+if command -v python3 &> /dev/null; then
+    python3 -m venv venv
+elif command -v python &> /dev/null; then
+    python -m venv venv
+else
+    echo 'ERROR: No Python executable found on $PATH'
+    exit 1
+fi
+
+. ./venv/bin/activate
+
+pip install --upgrade pip
+
+pip install openpyxl
+pip install pandas
+pip install rich
+pip install tqdm
